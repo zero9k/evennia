@@ -1,7 +1,8 @@
-# Evennia dependencies. If using pip, this file can be used to install
-# dependencies directly, using 'pip install -r requirements.txt'.
+# Evennia dependencies, for Linux/Mac platforms
 
-django >= 1.5
-twisted >= 11.0
-pillow
-south >= 0.8.4
+django >= 1.8, < 1.10
+twisted >= 16.0.0
+mock >= 1.0.1
+pillow == 2.9.0
+pytz
+future >= 0.15.2
