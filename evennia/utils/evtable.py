@@ -322,6 +322,7 @@ class EvCell(object):
     and resize as needed.
 
     """
+
     def __init__(self, data, **kwargs):
         """
         Args:
@@ -472,7 +473,7 @@ class EvCell(object):
         """
         if m_len(text) > width:
             crop_string = self.crop_string
-            return text[:width-m_len(crop_string)] + crop_string
+            return text[:width - m_len(crop_string)] + crop_string
         return text
 
     def _reformat(self):
@@ -524,10 +525,14 @@ class EvCell(object):
             # don't allow too high cells
             excess = len(adjusted_data) - self.height
             if excess > 0:
-                # too many lines. Crop and mark last line with ...
+                # too many lines. Crop and mark last line with crop_string
+                crop_string = self.crop_string
                 adjusted_data = adjusted_data[:-excess]
-                if len(adjusted_data[-1]) > 3:
-                    adjusted_data[-1] = adjusted_data[-1][:-2] + ".."
+                crop_string_length = len(crop_string)
+                if len(adjusted_data[-1]) > crop_string_length:
+                    adjusted_data[-1] = adjusted_data[-1][:-crop_string_length] + crop_string
+                else:
+                    adjusted_data[-1] += crop_string
             elif excess < 0:
                 # too few lines. Fill to height.
                 adjusted_data.extend(["" for _ in range(excess)])
@@ -661,7 +666,7 @@ class EvCell(object):
         left = self.border_left_char * self.border_left + ANSIString('|n')
         right = ANSIString('|n') + self.border_right_char * self.border_right
 
-        cwidth = self.width + self.pad_left + self.pad_right + max(0, self.border_left-1) + max(0, self.border_right-1)
+        cwidth = self.width + self.pad_left + self.pad_right + max(0, self.border_left - 1) + max(0, self.border_right - 1)
 
         vfill = self.corner_top_left_char if left else ""
         vfill += cwidth * self.border_top_char
@@ -849,7 +854,7 @@ class EvCell(object):
         return unicode(ANSIString("\n").join(self.formatted))
 
 
-## EvColumn class
+# EvColumn class
 
 class EvColumn(object):
     """
@@ -861,7 +866,8 @@ class EvColumn(object):
     incorporated into an EvTable (like EvCells)
 
     """
-    def __init__(self, *args,  **kwargs):
+
+    def __init__(self, *args, **kwargs):
         """
         Args:
             Text for each row in the column
@@ -887,6 +893,9 @@ class EvColumn(object):
 
         """
         col = self.column
+        # fixed options for the column will override those requested in the call!
+        # this is particularly relevant to things like width/height, to avoid
+        # fixed-widths columns from being auto-balanced
         kwargs.update(self.options)
         # use fixed width or adjust to the largest cell
         if "width" not in kwargs:
@@ -918,7 +927,7 @@ class EvColumn(object):
             self.column.extend([EvCell(data, **self.options) for data in args])
         else:
             # insert cells before given index
-            ypos = min(len(self.column)-1, max(0, int(ypos)))
+            ypos = min(len(self.column) - 1, max(0, int(ypos)))
             new_cells = [EvCell(data, **self.options) for data in args]
             self.column = self.column[:ypos] + new_cells + self.column[ypos:]
         # self._balance(**kwargs)
@@ -1223,7 +1232,7 @@ class EvTable(object):
         """
         Add borders to table. This is called from self._balance.
         """
-        nx, ny = self.ncols-1, self.nrows-1
+        nx, ny = self.ncols - 1, self.nrows - 1
         options = self.options
         for ix, col in enumerate(self.worktable):
             for iy, cell in enumerate(col):
@@ -1254,7 +1263,7 @@ class EvTable(object):
             self.worktable[icol].reformat(**options)
             if nrow < nrowmax:
                 # add more rows to too-short columns
-                empty_rows = ["" for _ in range(nrowmax-nrow)]
+                empty_rows = ["" for _ in range(nrowmax - nrow)]
                 self.worktable[icol].add_rows(*empty_rows)
         self.ncols = ncols
         self.nrows = nrowmax
@@ -1277,25 +1286,59 @@ class EvTable(object):
                 cwidths_min = [max(cell.get_min_width() for cell in col) for col in self.worktable]
                 cwmin = sum(cwidths_min)
 
-                if cwmin > width:
-                    # we cannot shrink any more
-                    raise Exception("Cannot shrink table width to %s. Minimum size is %s." % (self.width, cwmin))
+                # get which cols have separately set widths - these should be locked
+                # note that we need to remove cwidths_min for each lock to avoid counting
+                # it twice (in cwmin and in locked_cols)
+                locked_cols = {icol: col.options['width'] - cwidths_min[icol]
+                               for icol, col in enumerate(self.worktable) if 'width' in col.options}
+                locked_width = sum(locked_cols.values())
 
-                excess = width - cwmin
+                excess = width - cwmin - locked_width
+
+                if len(locked_cols) >= ncols and excess:
+                    # we can't adjust the width at all - all columns are locked
+                    raise Exception("Cannot balance table to width %s - "
+                                    "all columns have a set, fixed width summing to %s!" % (
+                                        self.width, sum(cwidths)))
+
+                if excess < 0:
+                    # the locked cols makes it impossible
+                    raise Exception("Cannot shrink table width to %s. "
+                                    "Minimum size (and/or fixed-width columns) "
+                                    "sets minimum at %s." % (self.width, cwmin + locked_width))
+
                 if self.evenwidth:
                     # make each column of equal width
-                    for _ in range(excess):
+                    # use cwidths as a work-array to track weights
+                    cwidths = copy(cwidths_min)
+                    correction = 0
+                    while correction < excess:
                         # flood-fill the minimum table starting with the smallest columns
-                        ci = cwidths_min.index(min(cwidths_min))
-                        cwidths_min[ci] += 1
+                        ci = cwidths.index(min(cwidths))
+                        if ci in locked_cols:
+                            # locked column, make sure it's not picked again
+                            cwidths[ci] += 9999
+                            cwidths_min[ci] = locked_cols[ci]
+                        else:
+                            cwidths_min[ci] += 1
+                            correction += 1
                     cwidths = cwidths_min
                 else:
                     # make each column expand more proportional to their data size
-                    for _ in range(excess):
+                    # we use cwidth as a work-array to track weights
+                    correction = 0
+                    while correction < excess:
                         # fill wider columns first
                         ci = cwidths.index(max(cwidths))
-                        cwidths_min[ci] += 1
-                        cwidths[ci] -= 3
+                        if ci in locked_cols:
+                            # locked column, make sure it's not picked again
+                            cwidths[ci] -= 9999
+                            cwidths_min[ci] = locked_cols[ci]
+                        else:
+                            cwidths_min[ci] += 1
+                            correction += 1
+                            # give a just changed col less prio next run
+                            cwidths[ci] -= 3
                     cwidths = cwidths_min
 
         # reformat worktable (for width align)
@@ -1317,28 +1360,46 @@ class EvTable(object):
                                     for cell in (col[iy] for col in self.worktable)) for iy in range(nrowmax)]
                 chmin = sum(cheights_min)
 
+                # get which cols have separately set heights - these should be locked
+                # note that we need to remove cheights_min for each lock to avoid counting
+                # it twice (in chmin and in locked_cols)
+                locked_cols = {icol: col.options['height'] - cheights_min[icol]
+                               for icol, col in enumerate(self.worktable) if 'height' in col.options}
+                locked_height = sum(locked_cols.values())
+
+                excess = self.height - chmin - locked_height
+
                 if chmin > self.height:
                     # we cannot shrink any more
-                    raise Exception("Cannot shrink table height to %s. Minimum size is %s." % (self.height, chmin))
+                    raise Exception("Cannot shrink table height to %s. Minimum "
+                                    "size (and/or fixed-height rows) sets minimum at %s." % (
+                                        self.height, chmin + locked_height))
 
                 # now we add all the extra height up to the desired table-height.
                 # We do this so that the tallest cells gets expanded first (and
                 # thus avoid getting cropped)
 
-                excess = self.height - chmin
                 even = self.height % 2 == 0
-                for position in range(excess):
+                correction = 0
+                while correction < excess:
                     # expand the cells with the most rows first
-                    if 0 <= position < nrowmax and nrowmax > 1:
+                    if 0 <= correction < nrowmax and nrowmax > 1:
                         # avoid adding to header first round (looks bad on very small tables)
                         ci = cheights[1:].index(max(cheights[1:])) + 1
                     else:
                         ci = cheights.index(max(cheights))
-                    cheights_min[ci] += 1
-                    if ci == 0 and self.header:
-                        # it doesn't look very good if header expands too fast
-                        cheights[ci] -= 2 if even else 3
-                    cheights[ci] -= 2 if even else 1
+                    if ci in locked_cols:
+                        # locked row, make sure it's not picked again
+                        cheights[ci] -= 9999
+                        cheights_min[ci] = locked_cols[ci]
+                    else:
+                        cheights_min[ci] += 1
+                        # change balance
+                        if ci == 0 and self.header:
+                            # it doesn't look very good if header expands too fast
+                            cheights[ci] -= 2 if even else 3
+                        cheights[ci] -= 2 if even else 1
+                        correction += 1
                 cheights = cheights_min
 
                 # we must tell cells to crop instead of expanding
@@ -1415,8 +1476,21 @@ class EvTable(object):
         column = EvColumn(*args, **options)
         wtable = self.ncols
         htable = self.nrows
-        excess = len(column) - htable
 
+        header = kwargs.get("header", None)
+        if header:
+            column.add_rows(unicode(header), ypos=0, **options)
+            self.header = True
+        elif self.header:
+            # we have a header already. Offset
+            column.add_rows("", ypos=0, **options)
+
+        # Calculate whether the new column needs to expand to the
+        # current table size, or if the table needs to expand to
+        # the column size.
+        # This needs to happen after the header rows have already been
+        # added to the column in order for the size calculations to match.
+        excess = len(column) - htable
         if excess > 0:
             # we need to add new rows to table
             for col in self.table:
@@ -1429,19 +1503,12 @@ class EvTable(object):
             column.add_rows(*empty_rows, **options)
             self.nrows -= excess
 
-        header = kwargs.get("header", None)
-        if header:
-            column.add_rows(unicode(header), ypos=0, **options)
-            self.header = True
-        elif self.header:
-            # we have a header already. Offset
-            column.add_rows("", ypos=0, **options)
         if xpos is None or xpos > wtable - 1:
             # add to the end
             self.table.append(column)
         else:
             # insert column
-            xpos = min(wtable-1, max(0, int(xpos)))
+            xpos = min(wtable - 1, max(0, int(xpos)))
             self.table.insert(xpos, column)
         self.ncols += 1
         # self._balance()
@@ -1491,7 +1558,7 @@ class EvTable(object):
                 col.add_rows(row[icol], **options)
         else:
             # insert row elsewhere
-            ypos = min(htable-1, max(0, int(ypos)))
+            ypos = min(htable - 1, max(0, int(ypos)))
             for icol, col in enumerate(self.table):
                 col.add_rows(row[icol], ypos=ypos, **options)
         self.nrows += 1
@@ -1542,6 +1609,8 @@ class EvTable(object):
         """
         if index > len(self.table):
             raise Exception("Not a valid column index")
+        # we update the columns' options which means eventual width/height
+        # will be 'locked in' and withstand auto-balancing width/height from the table later
         self.table[index].options.update(kwargs)
         self.table[index].reformat(**kwargs)
 
@@ -1557,6 +1626,7 @@ class EvTable(object):
 
     def __str__(self):
         """print table (this also balances it)"""
+        # h = "12345678901234567890123456789012345678901234567890123456789012345678901234567890"
         return str(unicode(ANSIString("\n").join([line for line in self._generate_lines()])))
 
     def __unicode__(self):
@@ -1575,9 +1645,9 @@ def _test():
     print(unicode(table))
     return table
 
+
 def _test2():
     table = EvTable("|yHeading1|n", "|B|[GHeading2|n", "Heading3")
     for i in range(100):
         table.add_row("This is col 0, row %i" % i, "|gThis is col 1, row |w%i|n|g.|n" % i, "This is col 2, row %i" % i)
     return table
-

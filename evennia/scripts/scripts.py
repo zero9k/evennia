@@ -18,6 +18,17 @@ from future.utils import with_metaclass
 __all__ = ["DefaultScript", "DoNothing", "Store"]
 
 
+FLUSHING_INSTANCES = False  # whether we're in the process of flushing scripts from the cache
+SCRIPT_FLUSH_TIMERS = {}  # stores timers for scripts that are currently being flushed
+
+
+def restart_scripts_after_flush():
+    """After instances are flushed, validate scripts so they're not dead for a long period of time"""
+    global FLUSHING_INSTANCES
+    ScriptDB.objects.validate()
+    FLUSHING_INSTANCES = False
+
+
 class ExtendedLoopingCall(LoopingCall):
     """
     LoopingCall that can start at a delay different
@@ -115,7 +126,6 @@ class ExtendedLoopingCall(LoopingCall):
         self.starttime = self.clock.seconds()
         self()
 
-
     def next_call_time(self):
         """
         Get the next call time. This also takes the eventual effect
@@ -141,15 +151,6 @@ class ScriptBase(with_metaclass(TypeclassBase, ScriptDB)):
 
     """
     objects = ScriptManager()
-
-
-class DefaultScript(ScriptBase):
-    """
-    This is the base TypeClass for all Scripts. Scripts describe
-    events, timers and states in game, they can have a time component
-    or describe a state that changes under certain conditions.
-
-    """
 
     def __eq__(self, other):
         """
@@ -202,8 +203,8 @@ class DefaultScript(ScriptBase):
         """
         cname = self.__class__.__name__
         estring = _("Script %(key)s(#%(dbid)s) of type '%(cname)s': at_repeat() error '%(err)s'.") % \
-                          {"key": self.key, "dbid": self.dbid, "cname": cname,
-                           "err": e.getErrorMessage()}
+            {"key": self.key, "dbid": self.dbid, "cname": cname,
+             "err": e.getErrorMessage()}
         try:
             self.db_obj.msg(estring)
         except Exception:
@@ -240,7 +241,96 @@ class DefaultScript(ScriptBase):
             logger.log_trace()
         return None
 
-    # Public methods
+    def at_script_creation(self):
+        """
+        Should be overridden in child.
+
+        """
+        pass
+
+    def at_first_save(self, **kwargs):
+        """
+        This is called after very first time this object is saved.
+        Generally, you don't need to overload this, but only the hooks
+        called by this method.
+
+        Args:
+            **kwargs (dict): Arbitrary, optional arguments for users
+                overriding the call (unused by default).
+
+        """
+        self.at_script_creation()
+
+        if hasattr(self, "_createdict"):
+            # this will only be set if the utils.create_script
+            # function was used to create the object. We want
+            # the create call's kwargs to override the values
+            # set by hooks.
+            cdict = self._createdict
+            updates = []
+            if not cdict.get("key"):
+                if not self.db_key:
+                    self.db_key = "#%i" % self.dbid
+                    updates.append("db_key")
+            elif self.db_key != cdict["key"]:
+                self.db_key = cdict["key"]
+                updates.append("db_key")
+            if cdict.get("interval") and self.interval != cdict["interval"]:
+                self.db_interval = cdict["interval"]
+                updates.append("db_interval")
+            if cdict.get("start_delay") and self.start_delay != cdict["start_delay"]:
+                self.db_start_delay = cdict["start_delay"]
+                updates.append("db_start_delay")
+            if cdict.get("repeats") and self.repeats != cdict["repeats"]:
+                self.db_repeats = cdict["repeats"]
+                updates.append("db_repeats")
+            if cdict.get("persistent") and self.persistent != cdict["persistent"]:
+                self.db_persistent = cdict["persistent"]
+                updates.append("db_persistent")
+            if cdict.get("desc") and self.desc != cdict["desc"]:
+                self.db_desc = cdict["desc"]
+                updates.append("db_desc")
+            if updates:
+                self.save(update_fields=updates)
+
+            if cdict.get("permissions"):
+                self.permissions.batch_add(*cdict["permissions"])
+            if cdict.get("locks"):
+                self.locks.add(cdict["locks"])
+            if cdict.get("tags"):
+                # this should be a list of tags, tuples (key, category) or (key, category, data)
+                self.tags.batch_add(*cdict["tags"])
+            if cdict.get("attributes"):
+                # this should be tuples (key, val, ...)
+                self.attributes.batch_add(*cdict["attributes"])
+            if cdict.get("nattributes"):
+                # this should be a dict of nattrname:value
+                for key, value in cdict["nattributes"]:
+                    self.nattributes.add(key, value)
+
+            if not cdict.get("autostart"):
+                # don't auto-start the script
+                return
+
+        # auto-start script (default)
+        self.start()
+
+
+class DefaultScript(ScriptBase):
+    """
+    This is the base TypeClass for all Scripts. Scripts describe
+    events, timers and states in game, they can have a time component
+    or describe a state that changes under certain conditions.
+
+    """
+
+    def at_script_creation(self):
+        """
+        Only called once, when script is first created.
+
+        """
+        pass
+
 
     def time_until_next_repeat(self):
         """
@@ -279,6 +369,27 @@ class DefaultScript(ScriptBase):
             return max(0, self.db_repeats - task.callcount)
         return None
 
+    def at_idmapper_flush(self):
+        """If we're flushing this object, make sure the LoopingCall is gone too"""
+        ret = super(DefaultScript, self).at_idmapper_flush()
+        if ret and self.ndb._task:
+            try:
+                from twisted.internet import reactor
+                global FLUSHING_INSTANCES
+                # store the current timers for the _task and stop it to avoid duplicates after cache flush
+                paused_time = self.ndb._task.next_call_time()
+                callcount = self.ndb._task.callcount
+                self._stop_task()
+                SCRIPT_FLUSH_TIMERS[self.id] = (paused_time, callcount)
+                # here we ensure that the restart call only happens once, not once per script
+                if not FLUSHING_INSTANCES:
+                    FLUSHING_INSTANCES = True
+                    reactor.callLater(2, restart_scripts_after_flush)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+        return ret
+
     def start(self, force_restart=False):
         """
         Called every time the script is started (for persistent
@@ -295,9 +406,19 @@ class DefaultScript(ScriptBase):
                 started or not. Used in counting.
 
         """
-
         if self.is_active and not force_restart:
-            # script already runs and should not be restarted.
+            # The script is already running, but make sure we have a _task if this is after a cache flush
+            if not self.ndb._task and self.db_interval >= 0:
+                self.ndb._task = ExtendedLoopingCall(self._step_task)
+                try:
+                    start_delay, callcount = SCRIPT_FLUSH_TIMERS[self.id]
+                    del SCRIPT_FLUSH_TIMERS[self.id]
+                    now = False
+                except (KeyError, ValueError, TypeError):
+                    now = not self.db_start_delay
+                    start_delay = None
+                    callcount = 0
+                self.ndb._task.start(self.db_interval, now=now, start_delay=start_delay, count_start=callcount)
             return 0
 
         obj = self.obj
@@ -473,83 +594,49 @@ class DefaultScript(ScriptBase):
         if task:
             task.force_repeat()
 
-    def at_first_save(self):
-        """
-        This is called after very first time this object is saved.
-        Generally, you don't need to overload this, but only the hooks
-        called by this method.
-        """
-        self.at_script_creation()
-
-        if hasattr(self, "_createdict"):
-            # this will only be set if the utils.create_script
-            # function was used to create the object. We want
-            # the create call's kwargs to override the values
-            # set by hooks.
-            cdict = self._createdict
-            updates = []
-            if not cdict.get("key"):
-                if not self.db_key:
-                    self.db_key = "#%i" % self.dbid
-                    updates.append("db_key")
-            elif self.db_key != cdict["key"]:
-                self.db_key = cdict["key"]
-                updates.append("db_key")
-            if cdict.get("interval") and self.interval != cdict["interval"]:
-                self.db_interval = cdict["interval"]
-                updates.append("db_interval")
-            if cdict.get("start_delay") and self.start_delay != cdict["start_delay"]:
-                self.db_start_delay = cdict["start_delay"]
-                updates.append("db_start_delay")
-            if cdict.get("repeats") and self.repeats != cdict["repeats"]:
-                self.db_repeats = cdict["repeats"]
-                updates.append("db_repeats")
-            if cdict.get("persistent") and self.persistent != cdict["persistent"]:
-                self.db_persistent = cdict["persistent"]
-                updates.append("db_persistent")
-            if updates:
-                self.save(update_fields=updates)
-            if not cdict.get("autostart"):
-                # don't auto-start the script
-                return
-
-        # auto-start script (default)
-        self.start()
-
-
-    def at_script_creation(self):
-        """
-        Only called once, by the create function.
-        """
-        pass
-
     def is_valid(self):
         """
         Is called to check if the script is valid to run at this time.
         Should return a boolean. The method is assumed to collect all
         needed information from its related self.obj.
+
         """
         return not self._is_deleted
 
-    def at_start(self):
+    def at_start(self, **kwargs):
         """
         Called whenever the script is started, which for persistent
         scripts is at least once every server start. It will also be
         called when starting again after a pause (such as after a
         server reload)
+
+        Args:
+            **kwargs (dict): Arbitrary, optional arguments for users
+                overriding the call (unused by default).
+
         """
         pass
 
-    def at_repeat(self):
+    def at_repeat(self, **kwargs):
         """
         Called repeatedly if this Script is set to repeat regularly.
+
+        Args:
+            **kwargs (dict): Arbitrary, optional arguments for users
+                overriding the call (unused by default).
+
         """
         pass
 
-    def at_stop(self):
+    def at_stop(self, **kwargs):
         """
         Called whenever when it's time for this script to stop (either
         because is_valid returned False or it runs out of iterations)
+
+        Args
+            **kwargs (dict): Arbitrary, optional arguments for users
+                overriding the call (unused by default).
+
         """
         pass
 
@@ -576,6 +663,7 @@ class DoNothing(DefaultScript):
     """
     A script that does nothing. Used as default fallback.
     """
+
     def at_script_creation(self):
         """
         Setup the script
@@ -588,6 +676,7 @@ class Store(DefaultScript):
     """
     Simple storage script
     """
+
     def at_script_creation(self):
         """
         Setup the script

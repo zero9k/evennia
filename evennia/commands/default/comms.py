@@ -2,16 +2,18 @@
 Comsystem command module.
 
 Comm commands are OOC commands and intended to be made available to
-the Player at all times (they go into the PlayerCmdSet). So we
-make sure to homogenize self.caller to always be the player object
+the Account at all times (they go into the AccountCmdSet). So we
+make sure to homogenize self.caller to always be the account object
 for easy handling.
 
 """
+import hashlib
+import time
 from past.builtins import cmp
 from django.conf import settings
 from evennia.comms.models import ChannelDB, Msg
-from evennia.players.models import PlayerDB
-from evennia.players import bots
+from evennia.accounts.models import AccountDB
+from evennia.accounts import bots
 from evennia.comms.channelhandler import CHANNELHANDLER
 from evennia.locks.lockhandler import LockException
 from evennia.utils import create, utils, evtable
@@ -69,14 +71,14 @@ class CmdAddCom(COMMAND_DEFAULT_CLASS):
     locks = "cmd:not pperm(channel_banned)"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Implement the command"""
 
         caller = self.caller
         args = self.args
-        player = caller
+        account = caller
 
         if not args:
             self.msg("Usage: addcom [alias =] channelname.")
@@ -96,21 +98,21 @@ class CmdAddCom(COMMAND_DEFAULT_CLASS):
             return
 
         # check permissions
-        if not channel.access(player, 'listen'):
+        if not channel.access(account, 'listen'):
             self.msg("%s: You are not allowed to listen to this channel." % channel.key)
             return
 
         string = ""
-        if not channel.has_connection(player):
+        if not channel.has_connection(account):
             # we want to connect as well.
-            if not channel.connect(player):
-                # if this would have returned True, the player is connected
+            if not channel.connect(account):
+                # if this would have returned True, the account is connected
                 self.msg("%s: You are not allowed to join this channel." % channel.key)
                 return
             else:
                 string += "You now listen to the channel %s. " % channel.key
         else:
-            if channel.unmute(player):
+            if channel.unmute(account):
                 string += "You unmute channel %s." % channel.key
             else:
                 string += "You are already connected to channel %s." % channel.key
@@ -145,13 +147,13 @@ class CmdDelCom(COMMAND_DEFAULT_CLASS):
     locks = "cmd:not perm(channel_banned)"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Implementing the command. """
 
         caller = self.caller
-        player = caller
+        account = caller
 
         if not self.args:
             self.msg("Usage: delcom <alias or channel>")
@@ -161,7 +163,7 @@ class CmdDelCom(COMMAND_DEFAULT_CLASS):
         channel = find_channel(caller, ostring, silent=True, noaliases=True)
         if channel:
             # we have given a channel name - unsubscribe
-            if not channel.has_connection(player):
+            if not channel.has_connection(account):
                 self.msg("You are not listening to that channel.")
                 return
             chkey = channel.key.lower()
@@ -171,7 +173,7 @@ class CmdDelCom(COMMAND_DEFAULT_CLASS):
                 for nick in [nick for nick in make_iter(caller.nicks.get(category="channel", return_obj=True))
                              if nick and nick.pk and nick.value[3].lower() == chkey]:
                     nick.delete()
-            disconnect = channel.disconnect(player)
+            disconnect = channel.disconnect(account)
             if disconnect:
                 wipednicks = " Eventual aliases were removed." if delnicks else ""
                 self.msg("You stop listening to channel '%s'.%s" % (channel.key, wipednicks))
@@ -209,7 +211,7 @@ class CmdAllCom(COMMAND_DEFAULT_CLASS):
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Runs the function"""
@@ -268,12 +270,12 @@ class CmdChannels(COMMAND_DEFAULT_CLASS):
     Use addcom/delcom to join and leave channels
     """
     key = "@channels"
-    aliases = ["@clist", "channels", "comlist", "chanlist", "channellist", "all channels"]
+    aliases = ["@clist", "comlist", "chanlist", "channellist", "all channels"]
     help_category = "Comms"
     locks = "cmd: not pperm(channel_banned)"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Implement function"""
@@ -297,7 +299,7 @@ class CmdChannels(COMMAND_DEFAULT_CLASS):
                 clower = chan.key.lower()
                 nicks = caller.nicks.get(category="channel", return_obj=True)
                 comtable.add_row(*["%s%s" % (chan.key, chan.aliases.all() and
-                                   "(%s)" % ",".join(chan.aliases.all()) or ""),
+                                             "(%s)" % ",".join(chan.aliases.all()) or ""),
                                    "%s" % ",".join(nick.db_key for nick in make_iter(nicks)
                                                    if nick and nick.value[3].lower() == clower),
                                    chan.db.desc])
@@ -345,7 +347,7 @@ class CmdCdestroy(COMMAND_DEFAULT_CLASS):
     locks = "cmd: not pperm(channel_banned)"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Destroy objects cleanly."""
@@ -372,30 +374,31 @@ class CmdCdestroy(COMMAND_DEFAULT_CLASS):
 
 class CmdCBoot(COMMAND_DEFAULT_CLASS):
     """
-    kick a player from a channel you control
+    kick an account from a channel you control
 
     Usage:
-       @cboot[/quiet] <channel> = <player> [:reason]
+       @cboot[/quiet] <channel> = <account> [:reason]
 
-    Switches:
+    Switch:
        quiet - don't notify the channel
 
-    Kicks a player or object from a channel you control.
+    Kicks an account or object from a channel you control.
 
     """
 
     key = "@cboot"
+    switch_options = ("quiet",)
     locks = "cmd: not pperm(channel_banned)"
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """implement the function"""
 
         if not self.args or not self.rhs:
-            string = "Usage: @cboot[/quiet] <channel> = <player> [:reason]"
+            string = "Usage: @cboot[/quiet] <channel> = <account> [:reason]"
             self.msg(string)
             return
 
@@ -404,12 +407,12 @@ class CmdCBoot(COMMAND_DEFAULT_CLASS):
             return
         reason = ""
         if ":" in self.rhs:
-            playername, reason = self.rhs.rsplit(":", 1)
-            searchstring = playername.lstrip('*')
+            accountname, reason = self.rhs.rsplit(":", 1)
+            searchstring = accountname.lstrip('*')
         else:
             searchstring = self.rhs.lstrip('*')
-        player = self.caller.search(searchstring, player=True)
-        if not player:
+        account = self.caller.search(searchstring, account=True)
+        if not account:
             return
         if reason:
             reason = " (reason: %s)" % reason
@@ -417,20 +420,20 @@ class CmdCBoot(COMMAND_DEFAULT_CLASS):
             string = "You don't control this channel."
             self.msg(string)
             return
-        if player not in channel.db_subscriptions.all():
-            string = "Player %s is not connected to channel %s." % (player.key, channel.key)
+        if not channel.subscriptions.has(account):
+            string = "Account %s is not connected to channel %s." % (account.key, channel.key)
             self.msg(string)
             return
         if "quiet" not in self.switches:
-            string = "%s boots %s from channel.%s" % (self.caller, player.key, reason)
+            string = "%s boots %s from channel.%s" % (self.caller, account.key, reason)
             channel.msg(string)
-        # find all player's nicks linked to this channel and delete them
+        # find all account's nicks linked to this channel and delete them
         for nick in [nick for nick in
-                     player.character.nicks.get(category="channel") or []
+                     account.character.nicks.get(category="channel") or []
                      if nick.value[3].lower() == channel.key]:
             nick.delete()
-        # disconnect player
-        channel.disconnect(player)
+        # disconnect account
+        channel.disconnect(account)
         CHANNELHANDLER.update()
 
 
@@ -453,11 +456,12 @@ class CmdCemit(COMMAND_DEFAULT_CLASS):
 
     key = "@cemit"
     aliases = ["@cmsg"]
-    locks = "cmd: not pperm(channel_banned) and pperm(Players)"
+    switch_options = ("sendername", "quiet")
+    locks = "cmd: not pperm(channel_banned) and pperm(Player)"
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Implement function"""
@@ -496,7 +500,7 @@ class CmdCWho(COMMAND_DEFAULT_CLASS):
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """implement function"""
@@ -530,11 +534,11 @@ class CmdChannelCreate(COMMAND_DEFAULT_CLASS):
 
     key = "@ccreate"
     aliases = "channelcreate"
-    locks = "cmd:not pperm(channel_banned) and pperm(Players)"
+    locks = "cmd:not pperm(channel_banned) and pperm(Player)"
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Implement the command"""
@@ -587,7 +591,7 @@ class CmdClock(COMMAND_DEFAULT_CLASS):
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """run the function"""
@@ -614,7 +618,7 @@ class CmdClock(COMMAND_DEFAULT_CLASS):
         # Try to add the lock
         try:
             channel.locks.add(self.rhs)
-        except LockException, err:
+        except LockException as err:
             self.msg(err)
             return
         string = "Lock(s) applied. "
@@ -639,7 +643,7 @@ class CmdCdesc(COMMAND_DEFAULT_CLASS):
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Implement command"""
@@ -666,10 +670,10 @@ class CmdCdesc(COMMAND_DEFAULT_CLASS):
 
 class CmdPage(COMMAND_DEFAULT_CLASS):
     """
-    send a private message to another player
+    send a private message to another account
 
     Usage:
-      page[/switches] [<player>,<player>,... = <message>]
+      page[/switches] [<account>,<account>,... = <message>]
       tell        ''
       page <number>
 
@@ -683,16 +687,17 @@ class CmdPage(COMMAND_DEFAULT_CLASS):
 
     key = "page"
     aliases = ['tell']
+    switch_options = ("last", "list")
     locks = "cmd:not pperm(page_banned)"
     help_category = "Comms"
 
     # this is used by the COMMAND_DEFAULT_CLASS parent
-    player_caller = True
+    account_caller = True
 
     def func(self):
         """Implement function using the Msg methods"""
 
-        # Since player_caller is set above, this will be a Player.
+        # Since account_caller is set above, this will be an Account.
         caller = self.caller
 
         # get the messages we've sent (not to channels)
@@ -718,7 +723,7 @@ class CmdPage(COMMAND_DEFAULT_CLASS):
                 try:
                     number = int(self.args)
                 except ValueError:
-                    self.msg("Usage: tell [<player> = msg]")
+                    self.msg("Usage: tell [<account> = msg]")
                     return
 
             if len(pages) > number:
@@ -767,7 +772,7 @@ class CmdPage(COMMAND_DEFAULT_CLASS):
             self.msg("Noone found to page.")
             return
 
-        header = "|wPlayer|n |c%s|n |wpages:|n" % caller.key
+        header = "|wAccount|n |c%s|n |wpages:|n" % caller.key
         message = self.rhs
 
         # if message begins with a :, we assume it is a 'page-pose'
@@ -778,7 +783,7 @@ class CmdPage(COMMAND_DEFAULT_CLASS):
         create.create_message(caller, message,
                               receivers=recobjs)
 
-        # tell the players they got a message.
+        # tell the accounts they got a message.
         received = []
         rstrings = []
         for pobj in recobjs:
@@ -805,7 +810,7 @@ def _list_bots():
         bots (str): A table of bots or an error message.
 
     """
-    ircbots = [bot for bot in PlayerDB.objects.filter(db_is_bot=True, username__startswith="ircbot-")]
+    ircbots = [bot for bot in AccountDB.objects.filter(db_is_bot=True, username__startswith="ircbot-")]
     if ircbots:
         from evennia.utils.evtable import EvTable
         table = EvTable("|w#dbref|n", "|wbotname|n", "|wev-channel|n",
@@ -836,7 +841,7 @@ class CmdIRC2Chan(COMMAND_DEFAULT_CLASS):
 
     Example:
       @irc2chan myircchan = irc.dalnet.net 6667 #mychannel evennia-bot
-      @irc2chan public = irc.freenode.net 6667 #evgaming #evbot:players.mybot.MyBot
+      @irc2chan public = irc.freenode.net 6667 #evgaming #evbot:accounts.mybot.MyBot
 
     This creates an IRC bot that connects to a given IRC network and
     channel. If a custom typeclass path is given, this will be used
@@ -850,7 +855,8 @@ class CmdIRC2Chan(COMMAND_DEFAULT_CLASS):
     """
 
     key = "@irc2chan"
-    locks = "cmd:serversetting(IRC_ENABLED) and pperm(Immortals)"
+    switch_options = ("delete", "remove", "disconnect", "list", "ssl")
+    locks = "cmd:serversetting(IRC_ENABLED) and pperm(Developer)"
     help_category = "Comms"
 
     def func(self):
@@ -868,11 +874,11 @@ class CmdIRC2Chan(COMMAND_DEFAULT_CLASS):
 
         if 'disconnect' in self.switches or 'remove' in self.switches or 'delete' in self.switches:
             botname = "ircbot-%s" % self.lhs
-            matches = PlayerDB.objects.filter(db_is_bot=True, username=botname)
+            matches = AccountDB.objects.filter(db_is_bot=True, username=botname)
             dbref = utils.dbref(self.lhs)
             if not matches and dbref:
                 # try dbref match
-                matches = PlayerDB.objects.filter(db_is_bot=True, id=dbref)
+                matches = AccountDB.objects.filter(db_is_bot=True, id=dbref)
             if matches:
                 matches[0].delete()
                 self.msg("IRC connection destroyed.")
@@ -890,7 +896,7 @@ class CmdIRC2Chan(COMMAND_DEFAULT_CLASS):
         self.rhs = self.rhs.replace('#', ' ')  # to avoid Python comment issues
         try:
             irc_network, irc_port, irc_channel, irc_botname = \
-                       [part.strip() for part in self.rhs.split(None, 4)]
+                [part.strip() for part in self.rhs.split(None, 4)]
             irc_channel = "#%s" % irc_channel
         except Exception:
             string = "IRC bot definition '%s' is not valid." % self.rhs
@@ -906,16 +912,17 @@ class CmdIRC2Chan(COMMAND_DEFAULT_CLASS):
         irc_ssl = "ssl" in self.switches
 
         # create a new bot
-        bot = PlayerDB.objects.filter(username__iexact=botname)
+        bot = AccountDB.objects.filter(username__iexact=botname)
         if bot:
             # re-use an existing bot
             bot = bot[0]
             if not bot.is_bot:
-                self.msg("Player '%s' already exists and is not a bot." % botname)
+                self.msg("Account '%s' already exists and is not a bot." % botname)
                 return
         else:
+            password = hashlib.md5(str(time.time())).hexdigest()[:11]
             try:
-                bot = create.create_player(botname, None, None, typeclass=botclass)
+                bot = create.create_account(botname, None, password, typeclass=botclass)
             except Exception as err:
                 self.msg("|rError, could not create the bot:|n '%s'." % err)
                 return
@@ -943,7 +950,7 @@ class CmdIRCStatus(COMMAND_DEFAULT_CLASS):
 
     """
     key = "@ircstatus"
-    locks = "cmd:serversetting(IRC_ENABLED) and perm(ircstatus) or perm(Builders))"
+    locks = "cmd:serversetting(IRC_ENABLED) and perm(ircstatus) or perm(Builder))"
     help_category = "Comms"
 
     def func(self):
@@ -963,7 +970,7 @@ class CmdIRCStatus(COMMAND_DEFAULT_CLASS):
             return
         matches = None
         if utils.dbref(botname):
-            matches = PlayerDB.objects.filter(db_is_bot=True, id=utils.dbref(botname))
+            matches = AccountDB.objects.filter(db_is_bot=True, id=utils.dbref(botname))
         if not matches:
             self.msg("No matching IRC-bot found. Use @ircstatus without arguments to list active bots.")
             return
@@ -981,7 +988,7 @@ class CmdIRCStatus(COMMAND_DEFAULT_CLASS):
             # an asynchronous call.
             self.caller.msg("Requesting nicklist from %s (%s:%s)." % (channel, network, port))
             ircbot.get_nicklist(self.caller)
-        elif self.caller.locks.check_lockstring(self.caller, "dummy:perm(ircstatus) or perm(Immortals)"):
+        elif self.caller.locks.check_lockstring(self.caller, "dummy:perm(ircstatus) or perm(Developer)"):
             # reboot the client
             self.caller.msg("Forcing a disconnect + reconnect of %s." % chtext)
             ircbot.reconnect()
@@ -1016,7 +1023,8 @@ class CmdRSS2Chan(COMMAND_DEFAULT_CLASS):
     """
 
     key = "@rss2chan"
-    locks = "cmd:serversetting(RSS_ENABLED) and pperm(Immortals)"
+    switch_options = ("disconnect", "remove", "list")
+    locks = "cmd:serversetting(RSS_ENABLED) and pperm(Developer)"
     help_category = "Comms"
 
     def func(self):
@@ -1038,7 +1046,7 @@ class CmdRSS2Chan(COMMAND_DEFAULT_CLASS):
 
         if 'list' in self.switches:
             # show all connections
-            rssbots = [bot for bot in PlayerDB.objects.filter(db_is_bot=True, username__startswith="rssbot-")]
+            rssbots = [bot for bot in AccountDB.objects.filter(db_is_bot=True, username__startswith="rssbot-")]
             if rssbots:
                 from evennia.utils.evtable import EvTable
                 table = EvTable("|wdbid|n", "|wupdate rate|n", "|wev-channel",
@@ -1052,10 +1060,10 @@ class CmdRSS2Chan(COMMAND_DEFAULT_CLASS):
 
         if 'disconnect' in self.switches or 'remove' in self.switches or 'delete' in self.switches:
             botname = "rssbot-%s" % self.lhs
-            matches = PlayerDB.objects.filter(db_is_bot=True, db_key=botname)
+            matches = AccountDB.objects.filter(db_is_bot=True, db_key=botname)
             if not matches:
                 # try dbref match
-                matches = PlayerDB.objects.filter(db_is_bot=True, id=self.args.lstrip("#"))
+                matches = AccountDB.objects.filter(db_is_bot=True, id=self.args.lstrip("#"))
             if matches:
                 matches[0].delete()
                 self.msg("RSS connection destroyed.")
@@ -1072,14 +1080,14 @@ class CmdRSS2Chan(COMMAND_DEFAULT_CLASS):
 
         botname = "rssbot-%s" % url
         # create a new bot
-        bot = PlayerDB.objects.filter(username__iexact=botname)
+        bot = AccountDB.objects.filter(username__iexact=botname)
         if bot:
             # re-use existing bot
             bot = bot[0]
             if not bot.is_bot:
-                self.msg("Player '%s' already exists and is not a bot." % botname)
+                self.msg("Account '%s' already exists and is not a bot." % botname)
                 return
         else:
-            bot = create.create_player(botname, None, None, typeclass=bots.RSSBot)
+            bot = create.create_account(botname, None, None, typeclass=bots.RSSBot)
         bot.start(ev_channel=channel, rss_url=url, rss_rate=10)
         self.msg("RSS reporter created. Fetching RSS.")

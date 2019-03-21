@@ -20,17 +20,19 @@ import textwrap
 import random
 from os.path import join as osjoin
 from importlib import import_module
-from inspect import ismodule, trace, getmembers, getmodule
+from inspect import ismodule, trace, getmembers, getmodule, getmro
 from collections import defaultdict, OrderedDict
 from twisted.internet import threads, reactor, task
 from django.conf import settings
 from django.utils import timezone
 from django.utils.translation import ugettext as _
+from django.apps import apps
 from evennia.utils import logger
 
 _MULTIMATCH_TEMPLATE = settings.SEARCH_MULTIMATCH_TEMPLATE
 _EVENNIA_DIR = settings.EVENNIA_DIR
 _GAME_DIR = settings.GAME_DIR
+
 
 try:
     import cPickle as pickle
@@ -42,7 +44,6 @@ _GA = object.__getattribute__
 _SA = object.__setattr__
 _DA = object.__delattr__
 
-_DEFAULT_WIDTH = settings.CLIENT_DEFAULT_WIDTH
 
 def is_iter(iterable):
     """
@@ -78,7 +79,7 @@ def make_iter(obj):
     return not hasattr(obj, '__iter__') and [obj] or obj
 
 
-def wrap(text, width=_DEFAULT_WIDTH, indent=0):
+def wrap(text, width=None, indent=0):
     """
     Safely wrap text to a certain number of characters.
 
@@ -91,16 +92,19 @@ def wrap(text, width=_DEFAULT_WIDTH, indent=0):
         text (str): Properly wrapped text.
 
     """
+    width = width if width else settings.CLIENT_DEFAULT_WIDTH
     if not text:
         return ""
     text = to_unicode(text)
     indent = " " * indent
     return to_str(textwrap.fill(text, width, initial_indent=indent, subsequent_indent=indent))
+
+
 # alias - fill
 fill = wrap
 
 
-def pad(text, width=_DEFAULT_WIDTH, align="c", fillchar=" "):
+def pad(text, width=None, align="c", fillchar=" "):
     """
     Pads to a given width.
 
@@ -115,6 +119,7 @@ def pad(text, width=_DEFAULT_WIDTH, align="c", fillchar=" "):
         text (str): The padded text.
 
     """
+    width = width if width else settings.CLIENT_DEFAULT_WIDTH
     align = align if align in ('c', 'l', 'r') else 'c'
     fillchar = fillchar[0] if fillchar else " "
     if align == 'l':
@@ -125,7 +130,7 @@ def pad(text, width=_DEFAULT_WIDTH, align="c", fillchar=" "):
         return text.center(width, fillchar)
 
 
-def crop(text, width=_DEFAULT_WIDTH, suffix="[...]"):
+def crop(text, width=None, suffix="[...]"):
     """
     Crop text to a certain width, throwing away text from too-long
     lines.
@@ -143,7 +148,7 @@ def crop(text, width=_DEFAULT_WIDTH, suffix="[...]"):
         text (str): The cropped text.
 
     """
-
+    width = width if width else settings.CLIENT_DEFAULT_WIDTH
     utext = to_unicode(text)
     ltext = len(utext)
     if ltext <= width:
@@ -154,12 +159,16 @@ def crop(text, width=_DEFAULT_WIDTH, suffix="[...]"):
         return to_str(utext)
 
 
-def dedent(text):
+def dedent(text, baseline_index=None):
     """
     Safely clean all whitespace at the left of a paragraph.
 
     Args:
         text (str): The text to dedent.
+        baseline_index (int or None, optional): Which row to use as a 'base'
+            for the indentation. Lines will be dedented to this level but
+            no further. If None, indent so as to completely deindent the
+            least indented text.
 
     Returns:
         text (str): Dedented string.
@@ -172,10 +181,17 @@ def dedent(text):
     """
     if not text:
         return ""
-    return textwrap.dedent(text)
+    if baseline_index is None:
+        return textwrap.dedent(text)
+    else:
+        lines = text.split('\n')
+        baseline = lines[baseline_index]
+        spaceremove = len(baseline) - len(baseline.lstrip(' '))
+        return "\n".join(line[min(spaceremove, len(line) - len(line.lstrip(' '))):]
+                         for line in lines)
 
 
-def justify(text, width=_DEFAULT_WIDTH, align="f", indent=0):
+def justify(text, width=None, align="f", indent=0):
     """
     Fully justify a text so that it fits inside `width`. When using
     full justification (default) this will be done by padding between
@@ -194,6 +210,7 @@ def justify(text, width=_DEFAULT_WIDTH, align="f", indent=0):
         justified (str): The justified and indented block of text.
 
     """
+    width = width if width else settings.CLIENT_DEFAULT_WIDTH
 
     def _process_line(line):
         """
@@ -205,18 +222,27 @@ def justify(text, width=_DEFAULT_WIDTH, align="f", indent=0):
         gap = " "  # minimum gap between words
         if line_rest > 0:
             if align == 'l':
-                line[-1] += " " * line_rest
+                if line[-1] == "\n\n":
+                    line[-1] = " " * (line_rest-1) + "\n" + " " * width + "\n" + " " * width
+                else:
+                    line[-1] += " " * line_rest
             elif align == 'r':
                 line[0] = " " * line_rest + line[0]
             elif align == 'c':
                 pad = " " * (line_rest // 2)
                 line[0] = pad + line[0]
-                line[-1] = line[-1] + pad + " " * (line_rest % 2)
+                if line[-1] == "\n\n":
+                    line[-1] += pad + " " * (line_rest % 2 - 1) + \
+                            "\n" + " " * width + "\n" + " " * width
+                else:
+                    line[-1] = line[-1] + pad + " " * (line_rest % 2)
             else:  # align 'f'
                 gap += " " * (line_rest // max(1, ngaps))
                 rest_gap = line_rest % max(1, ngaps)
                 for i in range(rest_gap):
                     line[i] += " "
+        elif not any(line):
+            return [" " * width]
         return gap.join(line)
 
     # split into paragraphs and words
@@ -255,6 +281,62 @@ def justify(text, width=_DEFAULT_WIDTH, align="f", indent=0):
         lines.append(_process_line(line))
     indentstring = " " * indent
     return "\n".join([indentstring + line for line in lines])
+
+
+def columnize(string, columns=2, spacing=4, align='l', width=None):
+    """
+    Break a string into a number of columns, using as little
+    vertical space as possible.
+
+    Args:
+        string (str): The string to columnize.
+        columns (int, optional): The number of columns to use.
+        spacing (int, optional): How much space to have between columns.
+        width (int, optional): The max width of the columns.
+            Defaults to client's default width.
+
+    Returns:
+        columns (str): Text divided into columns.
+
+    Raises:
+        RuntimeError: If given invalid values.
+
+    """
+    columns = max(1, columns)
+    spacing = max(1, spacing)
+    width = width if width else settings.CLIENT_DEFAULT_WIDTH
+
+    w_spaces = (columns - 1) * spacing
+    w_txt = max(1, width - w_spaces)
+
+    if w_spaces + columns > width:  # require at least 1 char per column
+        raise RuntimeError("Width too small to fit columns")
+
+    colwidth = int(w_txt / (1.0 * columns))
+
+    # first make a single column which we then split
+    onecol = justify(string, width=colwidth, align=align)
+    onecol = onecol.split("\n")
+
+    nrows, dangling = divmod(len(onecol), columns)
+    nrows = [nrows + 1 if i < dangling else nrows for i in range(columns)]
+
+    height = max(nrows)
+    cols = []
+    istart = 0
+    for irows in nrows:
+        cols.append(onecol[istart:istart+irows])
+        istart = istart + irows
+    for col in cols:
+        if len(col) < height:
+            col.append(" " * colwidth)
+
+    sep = " " * spacing
+    rows = []
+    for irow in range(height):
+        rows.append(sep.join(col[irow] for col in cols))
+
+    return "\n".join(rows)
 
 
 def list_to_string(inlist, endsep="and", addquote=False):
@@ -437,27 +519,27 @@ def time_format(seconds, style=0):
         """
         Only return the highest unit.
         """
-        if days >= 730: # Several years
+        if days >= 730:  # Several years
             return "{} years".format(days // 365)
-        elif days >= 365: # One year
+        elif days >= 365:  # One year
             return "a year"
-        elif days >= 62: # Several months
+        elif days >= 62:  # Several months
             return "{} months".format(days // 31)
-        elif days >= 31: # One month
+        elif days >= 31:  # One month
             return "a month"
-        elif days >= 2: # Several days
+        elif days >= 2:  # Several days
             return "{} days".format(days)
         elif days > 0:
             return "a day"
-        elif hours >= 2: # Several hours
+        elif hours >= 2:  # Several hours
             return "{} hours".format(hours)
-        elif hours > 0: # One hour
+        elif hours > 0:  # One hour
             return "an hour"
-        elif minutes >= 2: # Several minutes
+        elif minutes >= 2:  # Several minutes
             return "{} minutes".format(minutes)
-        elif minutes > 0: # One minute
+        elif minutes > 0:  # One minute
             return "a minute"
-        elif seconds >= 2: # Several seconds
+        elif seconds >= 2:  # Several seconds
             return "{} seconds".format(seconds)
         elif seconds == 1:
             return "a second"
@@ -593,9 +675,9 @@ def dbref(inp, reqhash=True):
     """
     if reqhash:
         num = (int(inp.lstrip('#')) if (isinstance(inp, basestring) and
-                                           inp.startswith("#") and
-                                           inp.lstrip('#').isdigit())
-                                       else None)
+                                        inp.startswith("#") and
+                                        inp.lstrip('#').isdigit())
+               else None)
         return num if num > 0 else None
     elif isinstance(inp, basestring):
         inp = inp.lstrip('#')
@@ -640,6 +722,7 @@ def dbref_to_obj(inp, objclass, raise_errors=True):
         if raise_errors:
             raise
         return inp
+
 
 # legacy alias
 dbid_to_obj = dbref_to_obj
@@ -788,7 +871,7 @@ def to_str(obj, encoding='utf-8', force_string=False):
         # if we get to this point we have not found any way to convert this string. Try to parse it manually,
         try:
             return latinify(obj, '?')
-        except Exception, err:
+        except Exception as err:
             raise Exception("%s, Error: Unicode could not encode unicode string '%s'(%s) to a bytestring. " % (err, obj, encoding))
     return obj
 
@@ -921,29 +1004,30 @@ def uses_database(name="sqlite3"):
 
 _TASK_HANDLER = None
 
+
 def delay(timedelay, callback, *args, **kwargs):
     """
     Delay the return of a value.
 
     Args:
-      timedelay (int or float): The delay in seconds
-      callback (callable): Will be called with optional
-        arguments after `timedelay` seconds.
-      args (any, optional): Will be used as arguments to callback
+        timedelay (int or float): The delay in seconds
+        callback (callable): Will be called as `callback(*args, **kwargs)`
+            after `timedelay` seconds.
+        args (any, optional): Will be used as arguments to callback
     Kwargs:
-       persistent (bool, optional): should make the delay persistent
-           over a reboot or reload
-       any (any): Will be used to call the callback.
+        persistent (bool, optional): should make the delay persistent
+            over a reboot or reload
+        any (any): Will be used as keyword arguments to callback.
 
     Returns:
-        deferred (deferred): Will fire fire with callback after
+        deferred (deferred): Will fire with callback after
             `timedelay` seconds. Note that if `timedelay()` is used in the
             commandhandler callback chain, the callback chain can be
             defined directly in the command body and don't need to be
             specified here.
 
     Note:
-        The task handler (`evennia.scripts.taskhandler.TASK_HANDLEr`) will
+        The task handler (`evennia.scripts.taskhandler.TASK_HANDLER`) will
         be called for persistent or non-persistent tasks.
         If persistent is set to True, the callback, its arguments
         and other keyword arguments will be saved in the database,
@@ -989,7 +1073,7 @@ def clean_object_caches(obj):
 
     # on-object property cache
     [_DA(obj, cname) for cname in viewkeys(obj.__dict__)
-                     if cname.startswith("_cached_db_")]
+     if cname.startswith("_cached_db_")]
     try:
         hashid = _GA(obj, "hashid")
         _TYPECLASSMODELS._ATTRIBUTE_CACHE[hashid] = {}
@@ -1001,6 +1085,8 @@ def clean_object_caches(obj):
 _PPOOL = None
 _PCMD = None
 _PROC_ERR = "A process has ended with a probable error condition: process ended by signal 9."
+
+
 def run_async(to_execute, *args, **kwargs):
     """
     Runs a function or executes a code snippet asynchronously.
@@ -1094,7 +1180,7 @@ def check_evennia_dependencies():
     errstring = errstring.strip()
     if errstring:
         mlen = max(len(line) for line in errstring.split("\n"))
-        logger.log_err("%s\n%s\n%s" % ("-"*mlen, errstring, '-'*mlen))
+        logger.log_err("%s\n%s\n%s" % ("-" * mlen, errstring, '-' * mlen))
     return not_error
 
 
@@ -1333,7 +1419,7 @@ def fuzzy_import_from_module(path, variable, default=None, defaultpaths=None):
         try:
             mod = import_module(modpath)
         except ImportError as ex:
-            if not str(ex).startswith ("No module named %s" % modpath):
+            if not str(ex).startswith("No module named %s" % modpath):
                 # this means the module was found but it
                 # triggers an ImportError on import.
                 raise ex
@@ -1396,16 +1482,18 @@ def class_from_module(path, defaultpaths=None):
             err += "."
         raise ImportError(err)
     return cls
+
+
 # alias
 object_from_module = class_from_module
 
 
-def init_new_player(player):
+def init_new_account(account):
     """
     Deprecated.
     """
     from evennia.utils import logger
-    logger.log_dep("evennia.utils.utils.init_new_player is DEPRECATED and should not be used.")
+    logger.log_dep("evennia.utils.utils.init_new_account is DEPRECATED and should not be used.")
 
 
 def string_similarity(string1, string2):
@@ -1430,7 +1518,7 @@ def string_similarity(string1, string2):
     vec2 = [string2.count(v) for v in vocabulary]
     try:
         return float(sum(vec1[i] * vec2[i] for i in range(len(vocabulary)))) / \
-               (math.sqrt(sum(v1**2 for v1 in vec1)) * math.sqrt(sum(v2**2 for v2 in vec2)))
+            (math.sqrt(sum(v1**2 for v1 in vec1)) * math.sqrt(sum(v2**2 for v2 in vec2)))
     except ZeroDivisionError:
         # can happen if empty-string cmdnames appear for some reason.
         # This is a no-match.
@@ -1456,9 +1544,9 @@ def string_suggestions(string, vocabulary, cutoff=0.6, maxnum=3):
 
     """
     return [tup[1] for tup in sorted([(string_similarity(string, sugg), sugg)
-                                       for sugg in vocabulary],
-                                           key=lambda tup: tup[0], reverse=True)
-                                           if tup[0] >= cutoff][:maxnum]
+                                      for sugg in vocabulary],
+                                     key=lambda tup: tup[0], reverse=True)
+            if tup[0] >= cutoff][:maxnum]
 
 
 def string_partial_matching(alternatives, inp, ret_index=True):
@@ -1537,6 +1625,7 @@ def format_table(table, extra_space=1):
     Examples:
 
         ```python
+        ftable = format_table([[...], [...], ...])
         for ir, row in enumarate(ftable):
             if ir == 0:
                 # make first row white
@@ -1589,6 +1678,7 @@ def get_evennia_pids():
         return int(server_pid), int(portal_pid)
     return None, None
 
+
 from gc import get_referents
 from sys import getsizeof
 
@@ -1622,11 +1712,12 @@ def deepsize(obj, max_depth=4):
             idr = id(ref)
             if idr not in dct:
                 dct[idr] = (ref, getsizeof(ref, default=0))
-                _recurse(ref, dct, depth+1)
+                _recurse(ref, dct, depth + 1)
     sizedict = {}
     _recurse(obj, sizedict, 0)
     size = getsizeof(obj) + sum([p[1] for p in sizedict.values()])
     return size
+
 
 # lazy load handler
 _missing = object()
@@ -1651,6 +1742,7 @@ class lazy_property(object):
     property "attributes" on the object.
 
     """
+
     def __init__(self, func, name=None, doc=None):
         """Store all properties for now"""
         self.__name__ = name or func.__name__
@@ -1667,6 +1759,7 @@ class lazy_property(object):
             value = self.func(obj)
         obj.__dict__[self.__name__] = value
         return value
+
 
 _STRIP_ANSI = None
 _RE_CONTROL_CHAR = re.compile('[%s]' % re.escape(''.join([unichr(c) for c in range(0, 32)])))  # + range(127,160)])))
@@ -1707,7 +1800,7 @@ def calledby(callerdepth=1):
     stack = inspect.stack()
     # we must step one extra level back in stack since we don't want
     # to include the call of this function itself.
-    callerdepth = min(max(2, callerdepth + 1), len(stack)-1)
+    callerdepth = min(max(2, callerdepth + 1), len(stack) - 1)
     frame = inspect.stack()[callerdepth]
     path = os.path.sep.join(frame[1].rsplit(os.path.sep, 2)[-2:])
     return "[called by '%s': %s:%s %s]" % (frame[3], path, frame[2], frame[4])
@@ -1773,16 +1866,20 @@ def at_search_result(matches, caller, query="", quiet=False, **kwargs):
         error = kwargs.get("nofound_string") or _("Could not find '%s'." % query)
         matches = None
     elif len(matches) > 1:
-        error = kwargs.get("multimatch_string") or \
-                _("More than one match for '%s' (please narrow target):\n" % query)
+        multimatch_string = kwargs.get("multimatch_string")
+        if multimatch_string:
+            error = "%s\n" % multimatch_string
+        else:
+            error = _("More than one match for '%s' (please narrow target):\n" % query)
+
         for num, result in enumerate(matches):
             # we need to consider Commands, where .aliases is a list
             aliases = result.aliases.all() if hasattr(result.aliases, "all") else result.aliases
             error += _MULTIMATCH_TEMPLATE.format(
-                 number=num + 1,
-                 name=result.get_display_name(caller) if hasattr(result, "get_display_name") else query,
-                 aliases=" [%s]" % ";".join(aliases) if aliases else "",
-                 info=result.get_extra_info(caller))
+                number=num + 1,
+                name=result.get_display_name(caller) if hasattr(result, "get_display_name") else query,
+                aliases=" [%s]" % ";".join(aliases) if aliases else "",
+                info=result.get_extra_info(caller))
         matches = None
     else:
         # exactly one match
@@ -1800,6 +1897,7 @@ class LimitedSizeOrderedDict(OrderedDict):
     grow out of bounds.
 
     """
+
     def __init__(self, *args, **kwargs):
         """
         Limited-size ordered dict.
@@ -1814,8 +1912,19 @@ class LimitedSizeOrderedDict(OrderedDict):
         """
         super(LimitedSizeOrderedDict, self).__init__()
         self.size_limit = kwargs.get("size_limit", None)
-        self.filo = not kwargs.get("fifo", True) # FIFO inverse of FILO
+        self.filo = not kwargs.get("fifo", True)  # FIFO inverse of FILO
         self._check_size()
+
+    def __eq__(self, other):
+        ret = super(LimitedSizeOrderedDict, self).__eq__(other)
+        if ret:
+            return (ret and
+                    hasattr(other, 'size_limit') and self.size_limit == other.size_limit and
+                    hasattr(other, 'fifo') and self.fifo == other.fifo)
+        return False
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
 
     def _check_size(self):
         filo = self.filo
@@ -1850,3 +1959,29 @@ def get_game_dir_path():
         else:
             os.chdir(os.pardir)
     raise RuntimeError("server/conf/settings.py not found: Must start from inside game dir.")
+
+
+def get_all_typeclasses(parent=None):
+    """
+    List available typeclasses from all available modules.
+
+    Args:
+        parent (str, optional): If given, only return typeclasses inheriting (at any distance)
+            from this parent.
+
+    Returns:
+        typeclasses (dict): On the form {"typeclass.path": typeclass, ...}
+
+    Notes:
+        This will dynamicall retrieve all abstract django models inheriting at any distance
+        from the TypedObject base (aka a Typeclass) so it will work fine with any custom
+        classes being added.
+
+    """
+    from evennia.typeclasses.models import TypedObject
+    typeclasses = {"{}.{}".format(model.__module__, model.__name__): model
+                   for model in apps.get_models() if TypedObject in getmro(model)}
+    if parent:
+        typeclasses = {name: typeclass for name, typeclass in typeclasses.items()
+                       if inherits_from(typeclass, parent)}
+    return typeclasses

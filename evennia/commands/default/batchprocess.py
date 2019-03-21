@@ -237,7 +237,8 @@ class CmdBatchCommands(_COMMAND_DEFAULT_CLASS):
     """
     key = "@batchcommands"
     aliases = ["@batchcommand", "@batchcmd"]
-    locks = "cmd:perm(batchcommands) or superuser()"
+    switch_options = ("interactive",)
+    locks = "cmd:perm(batchcommands) or perm(Developer)"
     help_category = "Building"
 
     def func(self):
@@ -347,6 +348,7 @@ class CmdBatchCode(_COMMAND_DEFAULT_CLASS):
     """
     key = "@batchcode"
     aliases = ["@batchcodes"]
+    switch_options = ("interactive", "debug")
     locks = "cmd:superuser()"
     help_category = "Building"
 

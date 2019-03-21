@@ -1,13 +1,13 @@
 """
 The command template for the default MUX-style command set. There
-is also an Player/OOC version that makes sure caller is a Player object.
+is also an Account/OOC version that makes sure caller is an Account object.
 """
 
 from evennia.utils import utils
 from evennia.commands.command import Command
 
 # limit symbol import for API
-__all__ = ("MuxCommand", "MuxPlayerCommand")
+__all__ = ("MuxCommand", "MuxAccountCommand")
 
 
 class MuxCommand(Command):
@@ -22,6 +22,7 @@ class MuxCommand(Command):
     used by Evennia to create the automatic help entry for
     the command, so make sure to document consistently here.
     """
+
     def has_perm(self, srcobj):
         """
         This is called by the cmdhandler to determine
@@ -78,6 +79,13 @@ class MuxCommand(Command):
         it here). The rest of the command is stored in self.args, which can
         start with the switch indicator /.
 
+        Optional variables to aid in parsing, if set:
+          self.switch_options  - (tuple of valid /switches expected by this
+                                  command (without the /))
+          self.rhs_split       - Alternate string delimiter or tuple of strings
+                                 to separate left/right hand sides. tuple form
+                                 gives priority split to first string delimiter.
+
         This parser breaks self.args into its constituents and stores them in the
         following variables:
           self.switches = [list of /switches (without the /)]
@@ -96,9 +104,18 @@ class MuxCommand(Command):
         """
         raw = self.args
         args = raw.strip()
+        # Without explicitly setting these attributes, they assume default values:
+        if not hasattr(self, "switch_options"):
+            self.switch_options = None
+        if not hasattr(self, "rhs_split"):
+            self.rhs_split = "="
+        if not hasattr(self, "account_caller"):
+            self.account_caller = False
 
         # split out switches
-        switches = []
+        switches, delimiters = [], self.rhs_split
+        if self.switch_options:
+            self.switch_options = [opt.lower() for opt in self.switch_options]
         if args and len(args) > 1 and raw[0] == "/":
             # we have a switch, or a set of switches. These end with a space.
             switches = args[1:].split(None, 1)
@@ -108,16 +125,50 @@ class MuxCommand(Command):
             else:
                 args = ""
                 switches = switches[0].split('/')
+            # If user-provides switches, parse them with parser switch options.
+            if switches and self.switch_options:
+                valid_switches, unused_switches, extra_switches = [], [], []
+                for element in switches:
+                    option_check = [opt for opt in self.switch_options if opt == element]
+                    if not option_check:
+                        option_check = [opt for opt in self.switch_options if opt.startswith(element)]
+                    match_count = len(option_check)
+                    if match_count > 1:
+                        extra_switches.extend(option_check)  # Either the option provided is ambiguous,
+                    elif match_count == 1:
+                        valid_switches.extend(option_check)  # or it is a valid option abbreviation,
+                    elif match_count == 0:
+                        unused_switches.append(element)  # or an extraneous option to be ignored.
+                if extra_switches:  # User provided switches
+                    self.msg('|g%s|n: |wAmbiguous switch supplied: Did you mean /|C%s|w?' %
+                             (self.cmdstring, ' |nor /|C'.join(extra_switches)))
+                if unused_switches:
+                    plural = '' if len(unused_switches) == 1 else 'es'
+                    self.msg('|g%s|n: |wExtra switch%s "/|C%s|w" ignored.' %
+                             (self.cmdstring, plural, '|n, /|C'.join(unused_switches)))
+                switches = valid_switches  # Only include valid_switches in command function call
         arglist = [arg.strip() for arg in args.split()]
 
         # check for arg1, arg2, ... = argA, argB, ... constructs
-        lhs, rhs = args, None
-        lhslist, rhslist = [arg.strip() for arg in args.split(',')], []
-        if args and '=' in args:
-            lhs, rhs = [arg.strip() for arg in args.split('=', 1)]
-            lhslist = [arg.strip() for arg in lhs.split(',')]
-            rhslist = [arg.strip() for arg in rhs.split(',')]
-
+        lhs, rhs = args.strip(), None
+        if lhs:
+            if delimiters and hasattr(delimiters, '__iter__'):  # If delimiter is iterable,
+                best_split = delimiters[0]  # (default to first delimiter)
+                for this_split in delimiters:  # try each delimiter
+                    if this_split in lhs:  # to find first successful split
+                        best_split = this_split  # to be the best split.
+                        break
+            else:
+                best_split = delimiters
+            # Parse to separate left into left/right sides using best_split delimiter string
+            if best_split in lhs:
+                lhs, rhs = lhs.split(best_split, 1)
+        # Trim user-injected whitespace
+        rhs = rhs.strip() if rhs is not None else None
+        lhs = lhs.strip()
+        # Further split left/right sides by comma delimiter
+        lhslist = [arg.strip() for arg in lhs.split(',')] if lhs is not None else ""
+        rhslist = [arg.strip() for arg in rhs.split(',')] if rhs is not None else ""
         # save to object properties:
         self.raw = raw
         self.switches = switches
@@ -128,17 +179,17 @@ class MuxCommand(Command):
         self.rhs = rhs
         self.rhslist = rhslist
 
-        # if the class has the player_caller property set on itself, we make
-        # sure that self.caller is always the player if possible. We also create
+        # if the class has the account_caller property set on itself, we make
+        # sure that self.caller is always the account if possible. We also create
         # a special property "character" for the puppeted object, if any. This
-        # is convenient for commands defined on the Player only.
-        if hasattr(self, "player_caller") and self.player_caller:
+        # is convenient for commands defined on the Account only.
+        if self.account_caller:
             if utils.inherits_from(self.caller, "evennia.objects.objects.DefaultObject"):
                 # caller is an Object/Character
                 self.character = self.caller
-                self.caller = self.caller.player
-            elif utils.inherits_from(self.caller, "evennia.players.players.DefaultPlayer"):
-                # caller was already a Player
+                self.caller = self.caller.account
+            elif utils.inherits_from(self.caller, "evennia.accounts.accounts.DefaultAccount"):
+                # caller was already an Account
                 self.character = self.caller.get_puppet(self.session)
             else:
                 self.character = None
@@ -168,6 +219,8 @@ class MuxCommand(Command):
         string += "\nraw argument (self.raw): |w%s|n \n" % self.raw
         string += "cmd args (self.args): |w%s|n\n" % self.args
         string += "cmd switches (self.switches): |w%s|n\n" % self.switches
+        string += "cmd options (self.switch_options): |w%s|n\n" % self.switch_options
+        string += "cmd parse left/right using (self.rhs_split): |w%s|n\n" % self.rhs_split
         string += "space-separated arg list (self.arglist): |w%s|n\n" % self.arglist
         string += "lhs, left-hand side of '=' (self.lhs): |w%s|n\n" % self.lhs
         string += "lhs, comma separated (self.lhslist): |w%s|n\n" % self.lhslist
@@ -177,32 +230,19 @@ class MuxCommand(Command):
         self.caller.msg(string)
 
 
-class MuxPlayerCommand(MuxCommand):
+class MuxAccountCommand(MuxCommand):
     """
-    This is an on-Player version of the MuxCommand. Since these commands sit
-    on Players rather than on Characters/Objects, we need to check
+    This is an on-Account version of the MuxCommand. Since these commands sit
+    on Accounts rather than on Characters/Objects, we need to check
     this in the parser.
 
-    Player commands are available also when puppeting a Character, it's
+    Account commands are available also when puppeting a Character, it's
     just that they are applied with a lower priority and are always
     available, also when disconnected from a character (i.e. "ooc").
 
-    This class makes sure that caller is always a Player object, while
+    This class makes sure that caller is always an Account object, while
     creating a new property "character" that is set only if a
-    character is actually attached to this Player and Session.
+    character is actually attached to this Account and Session.
     """
-    def parse(self):
-        """
-        We run the parent parser as usual, then fix the result
-        """
-        super(MuxPlayerCommand, self).parse()
 
-        if utils.inherits_from(self.caller, "evennia.objects.objects.DefaultObject"):
-            # caller is an Object/Character
-            self.character = self.caller
-            self.caller = self.caller.player
-        elif utils.inherits_from(self.caller, "evennia.players.players.DefaultPlayer"):
-            # caller was already a Player
-            self.character = self.caller.get_puppet(self.session)
-        else:
-            self.character = None
+    account_caller = True  # Using MuxAccountCommand explicitly defaults the caller to an account

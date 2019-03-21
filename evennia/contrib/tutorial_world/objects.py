@@ -23,9 +23,8 @@ from future.utils import listvalues
 import random
 
 from evennia import DefaultObject, DefaultExit, Command, CmdSet
-from evennia import utils
-from evennia.utils import search
-from evennia.utils.spawner import spawn
+from evennia.utils import search, delay
+from evennia.prototypes.spawner import spawn
 
 # -------------------------------------------------------------
 #
@@ -106,6 +105,7 @@ class CmdSetReadable(CmdSet):
     """
     A CmdSet for readables.
     """
+
     def at_cmdset_creation(self):
         """
         Called when the cmdset is created.
@@ -117,6 +117,7 @@ class Readable(TutorialObject):
     """
     This simple object defines some attributes and
     """
+
     def at_object_creation(self):
         """
         Called when object is created. We make sure to set the needed
@@ -176,6 +177,7 @@ class CmdClimb(Command):
 
 class CmdSetClimbable(CmdSet):
     """Climbing cmdset"""
+
     def at_cmdset_creation(self):
         """populate set"""
         self.add(CmdClimb())
@@ -303,6 +305,7 @@ class LightSource(TutorialObject):
 
     When burned out, the object will be deleted.
     """
+
     def at_init(self):
         """
         If this is called with the Attribute is_giving_light already
@@ -369,7 +372,7 @@ class LightSource(TutorialObject):
             # start the burn timer. When it runs out, self._burnout
             # will be called. We store the deferred so it can be
             # killed in unittesting.
-            self.deferred = utils.delay(60 * 3, self._burnout)
+            self.deferred = delay(60 * 3, self._burnout)
         return True
 
 
@@ -472,14 +475,14 @@ class CmdShiftRoot(Command):
                     root_pos["blue"] -= 1
                     self.caller.msg("The root with blue flowers gets in the way and is pushed to the left.")
             else:
-                self.caller.msg("You cannot move the root in that direction.")
+                self.caller.msg("The root hangs straight down - you can only move it left or right.")
         elif color == "blue":
             if direction == "left":
                 root_pos[color] = max(-1, root_pos[color] - 1)
                 self.caller.msg("You shift the root with small blue flowers to the left.")
                 if root_pos[color] != 0 and root_pos[color] == root_pos["red"]:
                     root_pos["red"] += 1
-                    self.caller.msg("The reddish root is to big to fit as well, so that one falls away to the left.")
+                    self.caller.msg("The reddish root is too big to fit as well, so that one falls away to the left.")
             elif direction == "right":
                 root_pos[color] = min(1, root_pos[color] + 1)
                 self.caller.msg("You shove the root adorned with small blue flowers to the right.")
@@ -487,7 +490,7 @@ class CmdShiftRoot(Command):
                     root_pos["red"] -= 1
                     self.caller.msg("The thick reddish root gets in the way and is pushed back to the left.")
             else:
-                self.caller.msg("You cannot move the root in that direction.")
+                self.caller.msg("The root hangs straight down - you can only move it left or right.")
 
         # now the horizontal roots (yellow/green). They can be moved up/down
         elif color == "yellow":
@@ -504,7 +507,7 @@ class CmdShiftRoot(Command):
                     root_pos["green"] -= 1
                     self.caller.msg("The weedy green root is shifted upwards to make room.")
             else:
-                self.caller.msg("You cannot move the root in that direction.")
+                self.caller.msg("The root hangs across the wall - you can only move it up or down.")
         elif color == "green":
             if direction == "up":
                 root_pos[color] = max(-1, root_pos[color] - 1)
@@ -519,7 +522,7 @@ class CmdShiftRoot(Command):
                     root_pos["yellow"] -= 1
                     self.caller.msg("The root with yellow flowers gets in the way and is pushed upwards.")
             else:
-                self.caller.msg("You cannot move the root in that direction.")
+                self.caller.msg("The root hangs across the wall - you can only move it up or down.")
 
         # we have moved the root. Store new position
         self.obj.db.root_pos = root_pos
@@ -582,13 +585,14 @@ class CrumblingWall(TutorialObject, DefaultExit):
     The CrumblingWall can be examined in various ways, but only if a
     lit light source is in the room. The traversal itself is blocked
     by a traverse: lock on the exit that only allows passage if a
-    certain attribute is set on the trying player.
+    certain attribute is set on the trying account.
 
     Important attribute
      destination - this property must be set to make this a valid exit
                    whenever the button is pushed (this hides it as an exit
                    until it actually is)
     """
+
     def at_init(self):
         """
         Called when object is recalled from cache.
@@ -640,7 +644,7 @@ class CrumblingWall(TutorialObject, DefaultExit):
         self.db.exit_open = True
         # start a 45 second timer before closing again. We store the deferred so it can be
         # killed in unittesting.
-        self.deferred = utils.delay(45, self.reset)
+        self.deferred = delay(45, self.reset)
 
     def _translate_position(self, root, ipos):
         """Translates the position into words"""
@@ -670,7 +674,7 @@ class CrumblingWall(TutorialObject, DefaultExit):
             # we found the button by moving the roots
             result = ["Having moved all the roots aside, you find that the center of the wall, "
                       "previously hidden by the vegetation, hid a curious square depression. It was maybe once "
-                      "concealed and made to look a part of the wall, but with the crumbling of stone around it,"
+                      "concealed and made to look a part of the wall, but with the crumbling of stone around it, "
                       "it's now easily identifiable as some sort of button."]
         elif self.db.exit_open:
             # we pressed the button; the exit is open
@@ -701,7 +705,7 @@ class CrumblingWall(TutorialObject, DefaultExit):
         self.reset()
 
     def at_failed_traverse(self, traverser):
-        """This is called if the player fails to pass the Exit."""
+        """This is called if the account fails to pass the Exit."""
         traverser.msg("No matter how you try, you cannot force yourself through %s." % self.key)
 
     def reset(self):
@@ -838,6 +842,7 @@ class CmdAttack(Command):
 
 class CmdSetWeapon(CmdSet):
     """Holds the attack command."""
+
     def at_cmdset_creation(self):
         """called at first object creation."""
         self.add(CmdAttack())
@@ -854,6 +859,7 @@ class Weapon(TutorialObject):
                type of attack) (0-10)
 
     """
+
     def at_object_creation(self):
         """Called at first creation of the object"""
         super(Weapon, self).at_object_creation()
@@ -868,7 +874,7 @@ class Weapon(TutorialObject):
         When reset, the weapon is simply deleted, unless it has a place
         to return to.
         """
-        if self.location.has_player and self.home == self.location:
+        if self.location.has_account and self.home == self.location:
             self.location.msg_contents("%s suddenly and magically fades into nothingness, as if it was never there ..."
                                        % self.key)
             self.delete()
@@ -899,19 +905,19 @@ WEAPON_PROTOTYPES = {
         "magic": False,
         "desc": "A generic blade."},
     "knife": {
-        "prototype": "weapon",
+        "prototype_parent": "weapon",
         "aliases": "sword",
         "key": "Kitchen knife",
         "desc": "A rusty kitchen knife. Better than nothing.",
         "damage": 3},
     "dagger": {
-        "prototype": "knife",
+        "prototype_parent": "knife",
         "key": "Rusty dagger",
         "aliases": ["knife", "dagger"],
         "desc": "A double-edged dagger with a nicked edge and a wooden handle.",
         "hit": 0.25},
     "sword": {
-        "prototype": "weapon",
+        "prototype_parent": "weapon",
         "key": "Rusty sword",
         "aliases": ["sword"],
         "desc": "A rusty shortsword. It has a leather-wrapped handle covered i food grease.",
@@ -919,28 +925,28 @@ WEAPON_PROTOTYPES = {
         "damage": 5,
         "parry": 0.5},
     "club": {
-        "prototype": "weapon",
+        "prototype_parent": "weapon",
         "key": "Club",
         "desc": "A heavy wooden club, little more than a heavy branch.",
         "hit": 0.4,
         "damage": 6,
         "parry": 0.2},
     "axe": {
-        "prototype": "weapon",
+        "prototype_parent": "weapon",
         "key": "Axe",
         "desc": "A woodcutter's axe with a keen edge.",
         "hit": 0.4,
         "damage": 6,
         "parry": 0.2},
     "ornate longsword": {
-        "prototype": "sword",
+        "prototype_parent": "sword",
         "key": "Ornate longsword",
         "desc": "A fine longsword with some swirling patterns on the handle.",
         "hit": 0.5,
         "magic": True,
         "damage": 5},
     "warhammer": {
-        "prototype": "club",
+        "prototype_parent": "club",
         "key": "Silver Warhammer",
         "aliases": ["hammer", "warhammer", "war"],
         "desc": "A heavy war hammer with silver ornaments. This huge weapon causes massive damage - if you can hit.",
@@ -948,21 +954,21 @@ WEAPON_PROTOTYPES = {
         "magic": True,
         "damage": 8},
     "rune axe": {
-        "prototype": "axe",
+        "prototype_parent": "axe",
         "key": "Runeaxe",
         "aliases": ["axe"],
         "hit": 0.4,
         "magic": True,
         "damage": 6},
     "thruning": {
-        "prototype": "ornate longsword",
+        "prototype_parent": "ornate longsword",
         "key": "Broadsword named Thruning",
         "desc": "This heavy bladed weapon is marked with the name 'Thruning'. It is very powerful in skilled hands.",
         "hit": 0.6,
         "parry": 0.6,
         "damage": 7},
     "slayer waraxe": {
-        "prototype": "rune axe",
+        "prototype_parent": "rune axe",
         "key": "Slayer waraxe",
         "aliases": ["waraxe", "war", "slayer"],
         "desc": "A huge double-bladed axe marked with the runes for 'Slayer'."
@@ -970,7 +976,7 @@ WEAPON_PROTOTYPES = {
         "hit": 0.7,
         "damage": 8},
     "ghostblade": {
-        "prototype": "ornate longsword",
+        "prototype_parent": "ornate longsword",
         "key": "The Ghostblade",
         "aliases": ["blade", "ghost"],
         "desc": "This massive sword is large as you are tall, yet seems to weigh almost nothing."
@@ -979,7 +985,7 @@ WEAPON_PROTOTYPES = {
         "parry": 0.8,
         "damage": 10},
     "hawkblade": {
-        "prototype": "ghostblade",
+        "prototype_parent": "ghostblade",
         "key": "The Hawkblade",
         "aliases": ["hawk", "blade"],
         "desc": "The weapon of a long-dead heroine and a more civilized age,"
@@ -987,7 +993,7 @@ WEAPON_PROTOTYPES = {
         "hit": 0.85,
         "parry": 0.7,
         "damage": 11}
-    }
+}
 
 
 class CmdGetWeapon(Command):
@@ -1032,11 +1038,12 @@ class WeaponRack(TutorialObject):
     Attributes to set on this object:
         available_weapons: list of prototype-keys from
             WEAPON_PROTOTYPES, the weapons available in this rack.
-        no_more_weapons_msg - error message to return to players
+        no_more_weapons_msg - error message to return to accounts
             who already got one weapon from the rack and tries to
             grab another one.
 
     """
+
     def at_object_creation(self):
         """
         called at creation
